@@ -35,7 +35,6 @@ class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        # h_size를 C//n_head로 만들려고 
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
@@ -44,30 +43,28 @@ class CausalSelfAttention(nn.Module):
         # regularization
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
-        # causalmask를 생성하고 model이 관리하는 buffer에 등록해줌. 
-        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
+        # causal mask to ensure that attention is only applied to the left in the input sequence
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                     .view(1, 1, config.block_size, config.block_size))
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # linear층은 입력의 마지막 차원에 대해서 연산을 수행한다고 함.
-        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2) # (B, T, C)  원래는 (B, T, 3C)인데 -> C 크기대로 분할했으니까... 
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, h_size)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # causal masking 수행
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf')) # (B, nh, T, T)
-        att = F.softmax(att, dim=-1) # (B, nh, T, T)
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
         att = self.attn_dropout(att)
-        # 행공간 관점에서의 행렬곱
         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        # 멀티헤드로 쪼개져있던 z들 다시 합침
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
@@ -121,13 +118,9 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.block_size = config.block_size
 
-        # 이미 만들어진 모델 사용할지 여부
         type_given = config.model_type is not None
-        # 자기가 커스텀해서 만들지 여부
         params_given = all([config.n_layer is not None, config.n_head is not None, config.n_embd is not None])
-        # 둘 중 하나만 가능
         assert type_given ^ params_given # exactly one of these (XOR)
-        # 이미 만들어진 모델이면 사전정의된 파라미터 설정 불러옴
         if type_given:
             # translate from model_type to detailed configuration
             config.merge_from_dict({
@@ -148,11 +141,8 @@ class GPT(nn.Module):
                 'gpt-nano':     dict(n_layer=3, n_head=3, n_embd=48),
             }[config.model_type])
 
-        # 트랜스포머 전체 구조 초기화
         self.transformer = nn.ModuleDict(dict(
-            # 토큰 임베딩
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            # 위치 임베딩
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.embd_pdrop),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
@@ -160,14 +150,13 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # 재귀적으로 자식모듈들에 초기화 실행
+        # init all weights, and apply a special scaled init to the residual projections, per GPT-2 paper
         self.apply(self._init_weights)
-        # MLP의 c_proj 레이어만 특별히 0에 가깝게 초기화해서 초반엔 잔차가 거의 0에서 시작
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
-        # 전체 파라미터 수 로깅
+        # report number of parameters (note we don't count the decoder parameters in lm_head)
         n_params = sum(p.numel() for p in self.transformer.parameters())
         print("number of parameters: %.2fM" % (n_params/1e6,))
 
