@@ -61,10 +61,10 @@ class Trainer:
     def run(self):
         model, config = self.model, self.config
 
-        # setup the optimizer
+        # optimizer 초기화
         self.optimizer = model.configure_optimizers(config)
 
-        # setup the dataloader
+        # DataLoader 초기화
         train_loader = DataLoader(
             self.train_dataset,
             sampler=torch.utils.data.RandomSampler(self.train_dataset, replacement=True, num_samples=int(1e10)),
@@ -78,32 +78,39 @@ class Trainer:
         self.iter_num = 0
         self.iter_time = time.time()
         data_iter = iter(train_loader)
+        # 일반적으로 하는대로 epoch단위로 학습하는게 아니라 iter단위로 학습길이 정함.
         while True:
 
-            # fetch the next batch (x, y) and re-init iterator if needed
+            # iter단위로 학습하기때문에 Dataloader 무한반복시켜야됨
             try:
                 batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(train_loader)
                 batch = next(data_iter)
+            # 데이터 텐서 device로 이동
             batch = [t.to(self.device) for t in batch]
             x, y = batch
 
-            # forward the model
+            # 순전파, 손실함수 계산. 
+            # minGPT구현에서는 forward가 prediction과 loss를 모두 출력함.
             logits, self.loss = model(x, y)
 
-            # backprop and update the parameters
+            # 그라디언트 초기화
             model.zero_grad(set_to_none=True)
+            # 역전파
             self.loss.backward()
+            # 그라디언트 클리핑
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm_clip)
+            # 가중치 업데이트
             self.optimizer.step()
 
+            # on_batch_end 이벤트에 반응하는 콜백함수 실행
             self.trigger_callbacks('on_batch_end')
             self.iter_num += 1
             tnow = time.time()
             self.iter_dt = tnow - self.iter_time
             self.iter_time = tnow
 
-            # termination conditions
+            # 설정한 iter 초과시 종료
             if config.max_iters is not None and self.iter_num >= config.max_iters:
                 break
