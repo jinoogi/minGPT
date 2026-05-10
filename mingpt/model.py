@@ -37,7 +37,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         # h_size를 C//n_head로 만들려고 
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
+        # W^Q, W^K, W^V 역할을 하는 부분인데, 신경망으로 구현하고 귀찮으니까 세 가중치를 하나로 뭉쳐서 나중에 쪼개씀.
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
@@ -150,9 +150,9 @@ class GPT(nn.Module):
 
         # 트랜스포머 전체 구조 초기화
         self.transformer = nn.ModuleDict(dict(
-            # 토큰 임베딩
+            # 토큰 임베딩. 학습대상인데 대신 Linear layer는 아니고 다르게생김.
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            # 위치 임베딩
+            # 위치 임베딩. 이것도 학습대상인데 대신 Linear layer는 아니고 다르게생김.
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.embd_pdrop),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
@@ -270,24 +270,31 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         device = idx.device
+        # B개의 토큰화된 시퀀스벡터들이 들어옴.
         b, t = idx.size()
+        # block_size가 max_model_len 역할임.
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
+        # positional encoding에 필요한 순서 seed
+        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, T)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
+        tok_emb = self.transformer.wte(idx) # (B, T, C)
+        pos_emb = self.transformer.wpe(pos) # (1, T, C)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+        # transformer 구조 특성상 시퀀스의 모든 위치에 대한 logits값이 나옴
+        logits = self.lm_head(x) # (B, T, vocab_size)
 
         # if we are given some desired targets also calculate the loss
         loss = None
         if targets is not None:
+            # logits는 (B * T, C) 형태로, targets는 (B * T) 형태로 펴줌
+            # ignore_index=-1 인자는 target값이 -1인 부분은 loss계산에서 제외하라는 뜻.
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
+        # 특이하게 logits뿐만 아니라 loss까지 반환하도록 구현.
         return logits, loss
 
     @torch.no_grad()
