@@ -305,24 +305,22 @@ class GPT(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
+            # 시퀀스 벡터 길이가 정상이면 그대로 쓰고, max_model_len 초과하면 뒷부분으로 크롭
             idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
+            # forward 연산 후 마지막 토큰만 추출
+            logits, _ = self(idx_cond) # (B, T, vocab_size)
+            logits = logits[:, -1, :] / temperature # (B, vocab_size)
+            # top_k가 켜져있으면 k개 밑으로는 아예 무시
             if top_k is not None:
                 v, _ = torch.topk(logits, top_k)
                 logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # either sample from the distribution or take the most likely element
+            probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+            # do_sample이 켜져있으면 샘플링, 아니면 greedy decoding함.
             if do_sample:
-                idx_next = torch.multinomial(probs, num_samples=1)
+                idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
             else:
                 _, idx_next = torch.topk(probs, k=1, dim=-1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
+            # 샘플링된 토큰 추가하고 반복
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
 
         return idx
